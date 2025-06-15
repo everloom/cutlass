@@ -399,7 +399,7 @@ public:
     AccumulatorTile const &accumulators,            ///< Complete warp-level accumulator tile
     OutputTileIterator source_iterator )            ///< Tile iterator for addend source
   {
-    if (output_op.is_source_needed())
+    if (output_op.is_source_needed())//当D=alpha*A*B + beta*C中的beta为0时，这里if就为false，然后iterator_C就不需要了，不需要从gmem加载C了，直接执行else
     {
       operator()(output_op, destination_iterator, accumulators, SourceAspectNeeded(source_iterator));
     }
@@ -524,12 +524,13 @@ public:
       //
 
       typename OutputTileIterator::Fragment output_fragment;
+      // 这里面会调用乘加运算，算alpha*A*B
       source.apply_output_operator(output_fragment, output_op, aligned_accum_fragment[0]);
 
       //
       // Store the final result
       //
-
+      // 写结果
       destination_iterator.store(output_fragment);
       ++destination_iterator;
     }
