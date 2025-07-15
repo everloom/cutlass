@@ -33,10 +33,13 @@
     \brief 
       Default kernel-level GEMM definitions combine threadblock-scoped matrix multiply-add with
       the appropriate threadblock-scoped epilogue.
+      默认的内核级GEMM定义将threadblock范围的矩阵乘加与适当的threadblock范围的收尾结合起来。
   
       Note, CUTLASS epilogues universally target row-major outputs. Column-major outputs are
       accommodated by exchanging A and B operands and assuming transposed layouts. Partial
       specializations here choose 'device::GemmTransposed' to implement this functionality.
+      注意，CUTLASS收尾部分通用地针对行主序输出。列主序输出通过交换A和B操作数并假设转置布局来实现。
+      这里的部分特化选择'device::GemmTransposed'来实现此功能。
 */
 
 #pragma once
@@ -137,7 +140,31 @@ template <
     typename Enable = void
 >
 struct DefaultGemm;
+/**
+  上面的DefaultGemm没有定义实现，因为这只是一个声明
+  然后下面会针对不同的架构，对DefaultGemm进行特化，实现不同的功能
 
+  # CUTLASS DefaultGemm 不同架构模板参数对比分析
+
+  ## 架构参数对比总结表
+
+  | 架构                  | 缺少的参数      | 固定的参数                                                 | 额外的参数        | 特殊处理      |
+  |---------------------|----------------|-------------------------------------------------------|-----------------|-------------|
+  | **Hopper (Sm90)**   | `LayoutC`      | `layout::RowMajor`                                    | 无              | 最新架构      |
+  | **Ada (Sm89)**      | `LayoutC`      | `layout::RowMajor`                                    | 无              | 与Hopper类似  |
+  | **Ampere (Sm80)**   | 无             | 无                                                     | 无              | 支持更多布局   |
+  | **Turing (Sm75)**   | `LayoutC`      | `layout::RowMajor`<br/>`Stages=2`                     | 无              | 固定2阶段     |
+  | **Volta (Sm70)**    | `LayoutC`      | `layout::RowMajor`<br/>`InstructionShape=GemmShape<8,8,4>`<br/>`Stages=2` | 无              | 固定指令形状   |
+  | **SIMT (通用)**      | 无             | `InstructionShape=GemmShape<1,1,1>`<br/>`Stages=2`    | `ArchTag`       | 通用架构标签   |
+  | **SIMT (Sm80)**     | 无             | `InstructionShape=GemmShape<1,1,1>`                   | `Stages`参数     | 支持可变阶段   |
+  | **DP4A**            | 无             | `ElementA=int8_t`<br/>`ElementB=int8_t`<br/>`InstructionShape=GemmShape<1,1,4>`<br/>`Stages=2` | `ArchTag`       | 专用整数优化   |
+  | **整数交错**          | 大部分参数      | 固定布局和数据类型                                        | `InterleavedK`  | 专用整数矩阵   |
+  | **WMMA**            | 无             | `GatherA=false`<br/>`GatherB=false`<br/>`ScatterD=false`<br/>`PermuteDLayout=NoPermute`<br/>`PermuteALayout=NoPermute` | `ArchTag`       | 固定多个选项   |
+
+  例如，对于Hopper架构，template缺少`LayoutC`参数，然后DefaultGemm中的模板传参把`LayoutC`固定为了`layout::RowMajor`参数
+
+
+ */
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Partial specialization for Hopper Architecture

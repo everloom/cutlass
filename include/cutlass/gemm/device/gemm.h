@@ -57,15 +57,20 @@ namespace device {
 
 /*! Gemm device-level operator. This is an interface to efficient CUTLASS GEMM kernels that may
   be invoked from host code.
+  中文：Gemm 设备级运算符。它为高效的 CUTLASS GEMM 内核提供一个可从主机代码调用的接口。
 
   The contributions of this class are:
+  中文：该类的主要作用包括：
     
     1. At compile time, it maps data types and high-level structural parameters onto 
        specific CUTLASS components.
+       中文：在编译期，将数据类型和高层次结构化参数映射到具体的 CUTLASS 组件。
 
     2. At runtime, it maps logical arguments to GEMM problems to kernel parameters.
+       中文：在运行期，将逻辑上的 GEMM 参数转换成内核可接受的参数形式。
 
     3. At runtime, it launches kernels on the device.
+       中文：在运行期，在 GPU 设备上启动对应的内核。
 
   The intent is to provide a convenient mechanism for interacting with most plausible GEMM
   configurations for each supported architecture. Consequently, not all parameters are exposed
@@ -74,18 +79,27 @@ namespace device {
   most configurations to be specified at this level. Applications with more exotic requirements 
   may construct their kernels of interest using CUTLASS components at the threadblock, warp, 
   and thread levels of abstraction.
+  中文：该设计旨在为各代架构上“最常见”的 GEMM 配置提供一个方便的交互方式。因此并不会把所有
+  底层参数都暴露给顶层接口，而是在 CUTLASS 不同层级上提供合理的默认值，以在简洁和灵活之间取得平衡。
+  大多数情况下，用户仅需在这一层进行配置；若有更特殊的需求，可以直接使用 CUTLASS 的线程块级、warp 级
+  或线程级组件自行组装内核。
 
   CUTLASS exposes computations using the functor design pattern in which objects compose some
   internal state with an overloaded function call operator. This enables decoupling of
   initialization from execution, possibly reducing overhead during steady state phases of
   application execution.
+  中文：CUTLASS 采用 functor（函数对象）设计模式来暴露计算——对象内部保存状态，并重载函数调用操作符，
+  从而将初始化与执行阶段解耦，有助于在应用进入稳定阶段后减少额外开销。
 
   CUTLASS device-level operators expose an Arguments structure encompassing each logical
   input to the computation. This is distinct from the kernel-level Params structure pattern
   which contains application-specific precomputed state needed by the device code.
+  中文：设备级运算符对外提供一个 Arguments 结构体，包含了计算所需的所有逻辑输入；
+  这与内核级的 Params 结构体（保存内核所需的预计算状态）是相互独立的。
 
   Example of a CUTLASS GEMM operator implementing the functionality of cuBLAS's SGEMM NN
   is as follows:
+  中文：下面示例演示了如何用 CUTLASS GEMM 运算符实现与 cuBLAS 中 SGEMM NN 相同的功能：
 
     //
     // Instantiate the CUTLASS GEMM operator.
@@ -166,6 +180,12 @@ namespace device {
     >
     class Gemm;
 */
+
+/**
+下面可以看到两个class Gemm的定义，其中第一个是Gemm主模板，第二个是主模板的偏特化
+然后第二个偏特化的Gemm中，是采用组合/转发的方式来使用主模板中定义的方法的
+关于主模板、偏特化、组合转发的内容，参考“学习cutlass时的C++知识点.docx”
+ */
 template <
     /// Element type for A matrix operand
     typename ElementA_,
@@ -688,7 +708,7 @@ class Gemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
   };
 
 private:
-
+ // 在类/对象初始化的时候，这个私有成员变量就会被初始化
   UnderlyingOperator underlying_operator_;
 
 public:
