@@ -39,7 +39,7 @@
 
 
 #ifdef CUTLASS_NAMESPACE
-#define concat_tok(a, b) a ## b
+#define concat_tok(a, b) a ## 
 #define mkcutlassnamespace(pre, ns) concat_tok(pre, ns)
 #define cutlass mkcutlassnamespace(cutlass_, CUTLASS_NAMESPACE)
 #endif

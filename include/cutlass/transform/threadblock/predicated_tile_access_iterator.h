@@ -508,38 +508,68 @@ class PredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
   }
 
   /// Advances an iterator along logical dimensions of matrix in units of whole tiles
+  // add_tile_offset() 函数：将迭代器沿矩阵的逻辑维度推进整数个 tile 的距离。
+  // 这是迭代器在 tile 之间移动的核心函数。
   CUTLASS_DEVICE
   void add_tile_offset(
-      TensorCoord const &tile_offset) {
+      TensorCoord const &tile_offset) { // tile_offset: 在 M, N, K 等维度上需要推进的 tile 数量
+
+    // 分支一：处理“残差 tile”(residue tile) 的情况
+    // is_residue_tile_ 是一个标志位，当迭代器刚被创建时，它为 true。
+    // 这意味着迭代器当前正指向一个可能未完全填满的、位于矩阵边缘的 tile。
+    // 首次调用 add_tile_offset (或者 ++ 运算符) 时，需要进行一次性的、较为复杂的初始化计算。
     if (is_residue_tile_) {
 
+      // 将残差偏移量加到线程的 tile 偏移量上，以修正初始位置。
       the_predicates.thread_offset_ += the_predicates.residue_offset_;
 
+      // 根据修正后的偏移量，重新计算掩码 (predicates)，以确定哪些内存访问是有效的。
+      // `true` 参数表示这是一次“稳态”计算，为后续的高效迭代做准备。
       the_predicates.compute_predicates_(the_predicates.extent_, true);
 
+      // 创建一个布局对象，用于计算地址偏移。
       Layout layout(params_.stride_);
 
+      // 分支 1.1: 处理常规布局 (非 Gather 且非 Permute) 的情况
       if (!Gather && !Permute) {
+        
+        // 根据残差偏移量计算出字节偏移，并更新基地址指针 pointer_。
         add_pointer_offset(layout(the_predicates.residue_offset_));
 
-        if (kAdvanceRank) {
+        // 根据迭代器主要推进的维度 (kAdvanceRank)，计算并增加 tile 级别的偏移。
+        if (kAdvanceRank) { // kAdvanceRank == 1, 沿 strided 维度推进
+          // inc_advance_ 是预计算好的、在主推进维度上移动一个 tile 所需的字节增量。
+          // tile_offset.strided() - 1: 因为第一次的偏移已经通过残差计算了，所以这里减 1。
           pointer_ += params_.inc_advance_ * LongIndex(tile_offset.strided() - 1);
+          // 在另一个维度（连续维度）上增加偏移。
           pointer_ += Shape::kContiguous * tile_offset.contiguous() * sizeof_bits<Element>::value / 8;
-        } else {
+        } else { // kAdvanceRank == 0, 沿 contiguous 维度推进
           pointer_ += params_.inc_advance_ * LongIndex(tile_offset.contiguous() - 1);
           pointer_ += Shape::kStrided * tile_offset.strided() * sizeof_bits<Element>::value / 8;
         }
-      } else {
+      } 
+      // 分支 1.2: 处理复杂布局 (Gather 或 Permute) 的情况
+      // 这种情况下不直接修改指针，而是更新逻辑坐标 coord_offset_。
+      // 真正的地址将在 get() 函数中根据这个坐标动态计算。
+      else {
+        // 更新跨步维度的逻辑坐标。
         coord_offset_.strided() = the_predicates.thread_offset_.strided() + Shape::kStrided * (tile_offset.strided() - kAdvanceRank);
         if (!Permute) {
+          // 对于 Gather，部分地址偏移可以预先计算并加到指针上。
           add_pointer_offset(layout(make_Coord(the_predicates.residue_offset_.contiguous(), 0)));
           add_pointer_offset(Shape::kContiguous * (tile_offset.contiguous() - (1 - kAdvanceRank)));
         } else {
+          // 对于 Permute，更新连续维度的逻辑坐标。
           coord_offset_.contiguous() = the_predicates.thread_offset_.contiguous() + Shape::kContiguous * (tile_offset.contiguous() - (1 - kAdvanceRank));
         }
       }
-    } else {
+    } 
+    // 分支二：处理“稳态”(steady-state) 的情况
+    // 在第一次调用之后，迭代器进入稳态。后续的 tile 推进操作变得非常轻量和高效。
+    else {
+      // 分支 2.1: 处理常规布局
       if (!Gather && !Permute) {
+        // 直接根据预计算好的增量 params_.inc_advance_ 来更新指针，效率极高。
         if (kAdvanceRank) {
           pointer_ += params_.inc_advance_ * LongIndex(tile_offset.strided());
           pointer_ += Shape::kContiguous * tile_offset.contiguous();
@@ -547,7 +577,10 @@ class PredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
           pointer_ += params_.inc_advance_ * LongIndex(tile_offset.contiguous());
           pointer_ += Shape::kStrided * tile_offset.strided();
         }
-      } else {
+      } 
+      // 分支 2.2: 处理复杂布局
+      else {
+        // 只更新逻辑坐标，保持指针不变。
         coord_offset_.strided() += Shape::kStrided * tile_offset.strided();
         if (!Permute) {
           add_pointer_offset(Shape::kContiguous * tile_offset.contiguous());
@@ -557,6 +590,8 @@ class PredicatedTileAccessIterator<Shape_, Element_, layout::PitchLinear,
       }
     }
 
+    // 在完成第一次的初始化计算后，将标志位设为 false。
+    // 这样，后续所有对 add_tile_offset 的调用都会走上面那个更高效的 `else` 分支。
     is_residue_tile_ = false;
   }
 

@@ -85,6 +85,16 @@ namespace threadblock {
 /// the iterator.
 ///
 ///
+/// 这是一种常规的 Tile 迭代器，它使用一个预先计算好的控制结构，以最大限度地减少寄存器的活跃期和整数算术运算。
+/// 布局 (Layout) 被假定在预计算的 "Params" 对象被构造时是不变的。
+/// 基地址指针和张量范围可以在迭代器被构造时指定。随后，它们被假定是不可变的。
+/// 可以在迭代器被构造时，为其添加一个逻辑坐标偏移。后续对逻辑坐标偏移的额外增加操作是允许的，但开销相对较高。
+/// 访问顺序的设计意图是，首先访问一个“残差” Tile (residual tile)，这个 Tile 可能在“前进维度”(advance dimension) 和“稳态维度”(steady-state dimension) 上
+/// 都是部分填充的。这个残差 Tile 被假定为整个迭代序列中的最后一个 Tile。将一个刚刚构造好的迭代器向前推进 (advance)，会使其移动到在“前进维度”上完全填充满的第
+/// 一个 Tile，并重新计算断言 (predicates)。随后的访问操作可以在不更新内部断言的情况下执行，这在活跃寄存器状态和指针算术指令方面都是高效的。
+/// 为了保持高效，这假定了迭代器将在任何循环结构之外，至少被解引用和推进一次，以最大限度地减少整数运算。
+/// 只要在解引用迭代器之前调用了 clear_mask()，越界访问就是安全的。
+
 /// Example:
 ///
 /// An efficient pipeline structure may be constructed as follows:
@@ -156,63 +166,98 @@ template <typename Shape_, typename Element_, int AdvanceRank,
 class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
                              ThreadMap_, AccessSize, Gather, PermuteLayout> {
  public:
+  // 静态断言，确保模板参数AdvanceRank的有效性
+  // 对于pitch-linear布局，迭代器只能沿着两个维度之一进行推进
+  // AdvanceRank=0: 沿着连续维度 (contiguous, rank=0)
+  // AdvanceRank=1: 沿着跨步维度 (strided, rank=1)
   static_assert(
       AdvanceRank == 0 || AdvanceRank == 1,
       "Specialization for pitch-linear iterator may advance along the "
       "contiguous(rank=0) or strided(rank=1) dimension.");
 
+  //
+  // 公有类型定义
+  //
+
+  // 描述Tile的形状，例如 cutlass::MatrixShape<M, K>
   using Shape = Shape_;
+  // 存储在Tile中的元素数据类型，例如 float, half
   using Element = Element_;
+  // 指定内存布局为PitchLinear，即行主序或列主序，带有步长
   using Layout = layout::PitchLinear;
+  // 定义迭代器主要推进的维度 (0或1)
   static int const kAdvanceRank = AdvanceRank;
+  // 线程映射策略，定义了threadblock中的线程如何映射到tile的坐标上
   using ThreadMap = ThreadMap_;
 
+  // 索引类型，通常是int
   using Index = typename Layout::Index;
+  // 长索引类型，用于处理更大的张量，通常是long long
   using LongIndex = typename Layout::LongIndex;
 
+  // TensorRef是对张量（指针+布局）的轻量级引用
   using TensorRef = TensorRef<Element, Layout>;
+  // TensorView是TensorRef的视图，增加了范围信息
   using TensorView = TensorView<Element, Layout>;
+  // 张量的坐标类型
   using TensorCoord = typename Layout::TensorCoord;
 
+  // 指向元素的原始指针类型
   using Pointer = Element *;
+  // 指向元素的非常量 (non-const) 原始指针类型
   using NonConstPointer = typename platform::remove_const<Element>::type *;
 
   /// Type used for internal memory accesses
+  /// 用于内部内存访问的类型。为了提高访存效率，通常将多个元素打包成一个更宽的类型进行访问。
   using AccessType = AlignedArray<Element, AccessSize, (AccessSize * sizeof_bits<Element>::value / 8)>;
 
   /// Underlying iterator to compute the addresses
+  /// 底层迭代器，负责计算内存地址。将地址计算的逻辑封装起来。
   using TileAccessIterator =
       PredicatedTileAccessIterator<Shape, Element, Layout, kAdvanceRank,
                                    ThreadMap, AccessType, Gather, PermuteLayout>;
 
+  // 每个向量化访存包含多少次单独的访存操作
   static int const kAccessesPerVector = TileAccessIterator::kAccessesPerVector;
 
   /// Fragment object to be loaded or stored
+  /// Fragment是存储在线程寄存器中的数据块。它的大小由线程映射策略决定，
+  /// 正好是单个线程在一个完整的tile加载/存储周期中负责的数据量。
   using Fragment = cutlass::Array<Element, ThreadMap::Iterations::kCount *
                                                ThreadMap::kElementsPerAccess>;
 
   /// Predicate vector stores mask to guard accesses
+  /// Predicate (断言) 向量，存储了一个掩码，用于保护内存访问。
+  /// 对于超出边界的内存访问，掩码对应的位会被设为false，从而避免访存。
   using Mask = typename TileAccessIterator::Mask;
 
   /// Parameters object is precomputed state and is host-constructible
+  /// Params对象是预先计算的状态，可以在主机端构造。
+  /// 它包含了布局信息等不变量，避免在设备端进行昂贵的计算。
   class Params {
    public:
+    // 基础参数类型，继承自底层的TileAccessIterator
     using Base = typename TileAccessIterator::Params::Base;
-
+    // 声明了外层的 PredicatedTileIterator 类是当前这个内部类 Params 的友元 (friend)
+    // 友元关系允许 PredicatedTileIterator 访问 Params 的私有成员params_
     friend PredicatedTileIterator;
 
    private:
     /// Parameters object
+    // 包含一个底层的TileAccessIterator的参数对象实例
     typename TileAccessIterator::Params params_;
 
    public:
     /// Construct the Params object given a pitch-linear tensor's layout
+    /// 构造函数：通过一个具体的布局对象来初始化参数
     CUTLASS_HOST_DEVICE
     Params(Layout const &layout) : params_(layout) {}
 
     /// Default constructor
+    // 默认构造函数
     Params() = default;
 
+    /// 构造函数：通过基础参数对象来初始化
     CUTLASS_HOST_DEVICE
     Params(Base const &base)
         : params_(base) {}
@@ -220,6 +265,7 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
 
  private:
   /// Internal pointer type permits fast address arithmetic
+  // 内部指针类型，使用char*可以方便地进行字节级别的地址运算
   using BytePointer = char *;
 
  private:
@@ -228,33 +274,41 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   //
 
   /// Data member to the tile access iterator
+  // 核心数据成员：一个底层的tile访问迭代器实例。
+  // 实际的地址计算和状态管理都委托给这个对象。
   TileAccessIterator address_iterator_;
 
  public:
 
   /// Default constructor
+  // 默认构造函数
   PredicatedTileIterator() = default;
 
   /// Constructs a TileIterator from its precomputed state, threadblock offset,
   /// and thread ID
+  // 核心构造函数：从预计算的Params对象、张量信息、线程ID和初始偏移来构造迭代器
   CUTLASS_HOST_DEVICE
   PredicatedTileIterator(
       /// Precomputed parameters object
-      Params const &params,
+      Params const &params,               // 预计算的参数
       /// Pointer to start of tensor
-      Pointer pointer,
+      Pointer pointer,                    // 指向张量起始位置的指针
       /// Extent of tensor
-      TensorCoord extent,
+      TensorCoord extent,                 // 张量的范围 (大小)
       /// ID of each participating thread
-      int thread_id,
+      int thread_id,                      // 参与计算的每个线程的ID
       /// Initial offset of threadblock
-      TensorCoord const &threadblock_offset,
+      TensorCoord const &threadblock_offset, // 当前threadblock的初始偏移
       /// Gather indices
-      int const *indices = nullptr)
+      int const *indices = nullptr        // 用于gather操作的索引数组 (可选)
+      )
+      // 使用成员初始化列表，直接构造底层的地址迭代器
+      // 这里相当于在初始化成员列表当中，对address_iterator_这个私有成员变量进行了初始化
       : address_iterator_(params.params_, pointer, extent, thread_id,
                           threadblock_offset, indices) {}
 
   /// Construct a PredicatedTileIterator with zero threadblock offset
+  // 构造函数重载：一个简化的版本，默认线程块偏移为(0,0)
   CUTLASS_HOST_DEVICE
   PredicatedTileIterator(
       Params const &params,  ///< Precomputed parameters object
@@ -262,10 +316,14 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
       TensorCoord extent,    ///< Extent of tensor
       int thread_id          ///< ID of each participating thread
       )
+      // 委托给上面的核心构造函数，传入一个零偏移
+      // 这里是委托构造函数(C++ 11 新特性)它的核心作用是：让一个构造函数去调用同一个类中的另一个构造函数。
+      // 这里调用的就是上面那个构造函数
       : PredicatedTileIterator(params, pointer, extent, thread_id,
                                make_Coord(0, 0)) {}
 
   /// Adds a pointer offset in units of Element
+  // 增加一个以元素为单位的指针偏移。这个操作会直接传递给底层的地址迭代器。
   CUTLASS_HOST_DEVICE
   void add_pointer_offset(LongIndex pointer_offset) {
     address_iterator_.add_pointer_offset(pointer_offset);
@@ -277,12 +335,15 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   /// iterator's internal pointer is reverted to the first "steady state" tile.
   /// Subsequent calls are lightweight and must only update the internal
   /// pointer.
+  // ++it (前缀自增运算符)
+  // 作用：将迭代器推进到内存中的下一个tile
   CUTLASS_HOST_DEVICE
   PredicatedTileIterator &operator++() {
+    // 根据kAdvanceRank的值，决定在哪个维度上增加tile偏移
     if (kAdvanceRank)
-      address_iterator_.add_tile_offset({0, 1});
+      address_iterator_.add_tile_offset({0, 1}); // 沿strided维度推进
     else
-      address_iterator_.add_tile_offset({1, 0});
+      address_iterator_.add_tile_offset({1, 0}); // 沿contiguous维度推进
 
     return *this;
   }
@@ -293,59 +354,82 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   /// iterator's internal pointer is reverted to the first "steady state" tile.
   /// Subsequent calls are lightweight and must only update the internal
   /// pointer.
+  // it++ (后缀自增运算符)
+  // 作用：将迭代器推进到下一个tile，并返回推进前的迭代器副本
   CUTLASS_HOST_DEVICE
   PredicatedTileIterator operator++(int) {
-    PredicatedTileIterator self(*this);
-    operator++();
-    return self;
+    PredicatedTileIterator self(*this); // 创建当前迭代器的副本
+    operator++();                       // 调用前缀自增来推进当前迭代器
+    return self;                        // 返回副本
   }
 
   /// Clears the predicate set efficiently
+  // 高效地清除(禁用)断言掩码。当enable=true时，所有访存都将被禁止。
   CUTLASS_HOST_DEVICE
   void clear_mask(bool enable = true) { address_iterator_.clear_mask(enable); }
 
   /// Clears the predicate set efficiently
+  // 高效地启用断言掩码。
   CUTLASS_HOST_DEVICE
   void enable_mask() { address_iterator_.enable_mask(); }
 
   /// Sets the predicate mask, overriding value stored in predicate iterator
+  // 设置断言掩码，用外部传入的mask覆盖内部存储的值。
   CUTLASS_HOST_DEVICE
   void set_mask(Mask const &mask) { address_iterator_.set_mask(mask); }
 
   /// Gets the mask
+  // 获取当前的断言掩码。
   CUTLASS_HOST_DEVICE
   void get_mask(Mask &mask) { address_iterator_.get_mask(mask); }
 
+  // 从全局内存加载数据到一个fragment中，并附加一个以元素为单位的指针偏移
   CUTLASS_DEVICE
   void load_with_pointer_offset(Fragment &frag, Index pointer_offset) {
+    // 将元素偏移转换为字节偏移
     load_with_byte_offset(frag, pointer_offset * sizeof_bits<Element>::value / 8);
   }
 
+  // 从全局内存加载数据到一个fragment中，并附加一个以字节为单位的指针偏移
   CUTLASS_DEVICE
   void load_with_byte_offset(Fragment &frag, LongIndex byte_offset) {
 
+    // 将fragment的指针重新解释为AccessType指针，以便进行向量化访存
     AccessType *frag_ptr = reinterpret_cast<AccessType *>(&frag);
 
+    // CUTLASS_PRAGMA_UNROLL是一个宏，提示编译器展开循环，以减少循环开销
     CUTLASS_PRAGMA_UNROLL
+    // 遍历strided维度上的所有迭代
     for (int s = 0; s < ThreadMap::Iterations::kStrided; ++s) {
       CUTLASS_PRAGMA_UNROLL
+      // 遍历contiguous维度上的所有迭代
       for (int c = 0; c < ThreadMap::Iterations::kContiguous; ++c) {
 
         CUTLASS_PRAGMA_UNROLL
+        // 在每个2D迭代点，进行向量化的访存
         for (int v = 0; v < kAccessesPerVector; ++v) {
 
+          // 计算当前在fragment中的一维索引
           int idx = v + kAccessesPerVector * (c + s * ThreadMap::Iterations::kContiguous);
           
+          // 更新底层地址迭代器的内部状态，使其指向当前要访问的元素
           address_iterator_.set_iteration_index(idx);
+          // 获取当前元素的地址(char*)，并加上字节偏移
           char const *byte_ptr = reinterpret_cast<char const *>(address_iterator_.get()) + byte_offset;
 
+          // 将计算出的地址重新解释为AccessType指针
           AccessType const *access_ptr = reinterpret_cast<AccessType const *>(byte_ptr);
 
+          // 执行全局内存加载操作
+          // 这是一个封装了内联PTX指令的函数，能够高效地加载数据
+          // 它会同时检查address_iterator_.valid()，如果为false，则不会执行加载，防止越界
           cutlass::arch::global_load<AccessType,
                                      sizeof(AccessType)
                                     >(
               frag_ptr[idx], access_ptr, address_iterator_.valid());
 
+          // 递增底层地址迭代器，为下一次循环做准备
+          // 注意：这里的++操作非常轻量，通常只增加指针
           ++address_iterator_;
         }
       }
@@ -353,21 +437,28 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   }
 
   /// Loads a fragment from memory
+  // 加载一个fragment，这是最常用的加载函数，内部调用了带字节偏移的版本
   CUTLASS_DEVICE
   void load(Fragment &frag) { load_with_byte_offset(frag, 0); }
 
   /// Store a fragment to memory
+  // 将一个fragment的数据存储到全局内存，并附加一个以元素为单位的指针偏移
   CUTLASS_DEVICE
   void store_with_pointer_offset(Fragment const &frag, Index pointer_offset) {
+    // 将元素偏移转换为字节偏移
     store_with_byte_offset(frag, pointer_offset * sizeof_bits<Element>::value / 8);
   }
 
   /// Store a fragment to memory
+  // 将一个fragment的数据存储到全局内存，并附加一个以字节为单位的指针偏移
   CUTLASS_DEVICE
   void store_with_byte_offset(Fragment const &frag, LongIndex byte_offset) {
+    // 重置底层迭代器的迭代索引，从头开始
     address_iterator_.set_iteration_index(0);
+    // 将fragment的指针重新解释为AccessType指针
     AccessType const *frag_ptr = reinterpret_cast<AccessType const *>(&frag);
 
+    // 循环结构与load函数完全相同
     CUTLASS_PRAGMA_UNROLL
     for (int s = 0; s < ThreadMap::Iterations::kStrided; ++s) {
       CUTLASS_PRAGMA_UNROLL
@@ -375,14 +466,18 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
         CUTLASS_PRAGMA_UNROLL
         for (int v = 0; v < kAccessesPerVector; ++v) {
 
+          // 计算一维索引
           int idx = v + kAccessesPerVector * (c + s * ThreadMap::Iterations::kContiguous);
 
+          // 获取目标地址
           char *byte_ptr = reinterpret_cast<char *>(address_iterator_.get()) + byte_offset;
           AccessType *access_ptr = reinterpret_cast<AccessType *>(byte_ptr);
 
+          // 检查地址是否有效，只有有效时才执行写入操作
           if (address_iterator_.valid()) {
             *access_ptr = frag_ptr[idx];
           }
+          // 推进底层迭代器
           ++address_iterator_;
         }
       }
@@ -390,6 +485,7 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   }
 
   /// Store a fragment to memory
+  // 存储一个fragment，最常用的存储函数
   CUTLASS_DEVICE
   void store(Fragment const &frag) { store_with_byte_offset(frag, 0); }
 };
@@ -718,7 +814,7 @@ public:
     Pointer pointer,                              ///< Pointer to start of tensor
     TensorCoord extent,                           ///< Extent of tensor
     int thread_id,                                ///< ID of each participating thread
-    TensorCoord const &threadblock_offset,        ///< Initial offset of threadblock
+    TensorCoord const &threadblock_offset,         ///< Initial offset of threadblock
     int const *indices = nullptr                        ///< Gather indices
   ):
     iterator_(
@@ -1463,12 +1559,6 @@ public:
 
   /// Loads a fragment from memory
   CUTLASS_DEVICE
-  void load_with_byte_offset(Fragment &frag, LongIndex byte_offset) {
-    iterator_.load_with_byte_offset(frag, byte_offset);
-  }
-
-  /// Loads a fragment from memory
-  CUTLASS_DEVICE
   void load(Fragment &frag) {
     load_with_pointer_offset(frag, 0);
   }
@@ -1477,12 +1567,6 @@ public:
   CUTLASS_DEVICE
   void store_with_pointer_offset(Fragment const &frag, Index pointer_offset) {
     iterator_.store_with_pointer_offset(frag, pointer_offset);
-  }
-  
-  /// Store a fragment to memory
-  CUTLASS_DEVICE
-  void store_with_byte_offset(Fragment const &frag, LongIndex byte_offset) {
-    iterator_.store_with_byte_offset(frag, byte_offset);
   }
 
   /// Store a fragment to memory
@@ -1807,8 +1891,7 @@ class PredicatedTileIterator<Shape_, Element_,
       TensorCoord extent,    ///< Extent of tensor
       int thread_id          ///< ID of each participating thread
       )
-      : PredicatedTileIterator(params, pointer, extent, thread_id,
-                               make_Coord(0, 0)) {}
+      : PredicatedTileIterator(params, pointer, extent, thread_id, make_Coord(0, 0)) { }
 
   /// Adds a pointer offset in units of Element
   CUTLASS_HOST_DEVICE
