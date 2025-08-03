@@ -1,0 +1,15 @@
+{
+    // VSCode + clangd 配置：专为 CUTLASS/CUDA 项目优化
+    
+    // 关闭默认的 C++ IntelliSense，使用 clangd
+    "C_Cpp.intelliSenseEngine": "disabled",
+    
+    // 文件关联配置：告诉 VSCode 如何识别不同的文件类型
+    "files.associations": {
+        // CUDA 文件类型
+        "*.cu": "cuda-cpp",
+        "*.cuh": "cuda-cpp",
+        // 将 .h 文件识别为 C++（支持 CUTLASS 模板）
+        "*.h": "cpp"
+    }
+} 

@@ -1,0 +1,34 @@
+# clangd 配置文件
+# 用于配置 C/C++/CUDA 语言服务器的行为
+
+CompileFlags:
+  Add:
+    # 项目头文件路径
+    - -I/home/p/Workspace/code/cuda_learn/cutlass_series/cutlass_for_universe_best_cuda_practice/include
+    - -I/home/p/Workspace/code/cuda_learn/cutlass_series/cutlass_for_universe_best_cuda_practice/tools/util/include
+    
+    # CUDA 头文件路径
+    - -I/usr/local/cuda/include
+    
+    # 系统头文件路径
+    - -I/usr/include/c++/11
+    - -I/usr/include/x86_64-linux-gnu/c++/11
+    
+    # 基本 CUDA 宏定义（解决语法识别问题）
+    - -D__CUDACC__
+    - -D__forceinline__=inline
+    - -D__device__=
+    - -D__host__=
+    - -D__global__=
+    
+    # C++ 标准版本
+    - -std=c++17
+
+# 诊断配置
+Diagnostics:
+  # 抑制不重要的警告
+  Suppress:
+    # 抑制未使用参数警告（在模板中很常见）
+    - unused-parameter
+    # 抑制 CUDA 相关的未知属性警告
+    - unknown-attributes 
