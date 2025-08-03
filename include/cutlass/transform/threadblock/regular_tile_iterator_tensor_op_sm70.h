@@ -494,6 +494,7 @@ public:
   }
 
   /// Advances to the next tile in memory.
+  // 对这个函数的理解可以参考include/cutlass/transform/threadblock/predicated_tile_iterator.h中PredicatedTileIterator operator++(int)的注释
   CUTLASS_HOST_DEVICE
   RegularTileIterator operator++(int) {
 
@@ -706,36 +707,94 @@ public:
     load_with_pointer_offset(frag, 0);
   }
 
-  /// Store a fragment to memory
+  /// 将fragment数据存储到内存中，支持额外的指针偏移
+  /// 
+  /// 这个函数是CUTLASS中tensor core操作的核心存储函数，负责将寄存器中的fragment数据
+  /// 高效地存储到共享内存或全局内存中。它处理复杂的内存布局、向量化访问和双缓冲机制。
+  ///
+  /// @param frag Fragment对象，包含要存储的数据（通常来自寄存器）
+  /// @param pointer_offset 额外的指针偏移量，用于支持动态内存位置调整
   CUTLASS_DEVICE
   void store_with_pointer_offset(
-    Fragment const &frag,
-    Index pointer_offset) {
+    Fragment const &frag,           ///< 输入：要存储的fragment数据
+    Index pointer_offset) {         ///< 输入：指针偏移量（以元素为单位）
 
+    // === 步骤1: Fragment数据类型转换 ===
+    // 将fragment转换为AccessType指针，以便进行向量化访问
+    // AccessType通常是经过优化的数据类型（如float4, int4等），
+    // 允许一次访问多个元素，提高内存带宽利用率
     AccessType const *frag_ptr = reinterpret_cast<AccessType const *>(&frag);
 
+    // === 步骤2: 计算向量化指针偏移 ===
+    // 将以元素为单位的偏移量转换为以AccessType为单位的偏移量
+    // 例如：如果AccessType是float4（128bit），kElementsPerAccess=4，
+    // 那么pointer_offset=8个float元素对应vec_pointer_offset=2个float4访问
     Index vec_pointer_offset = pointer_offset / ThreadMap::kElementsPerAccess;
 
+    // === 步骤3: 外层循环 - 遍历Strided维度 ===
+    // Strided维度通常对应矩阵的行方向或较大的跨步维度
+    // 这个循环处理fragment在该维度上的所有迭代
     CUTLASS_PRAGMA_UNROLL
     for (int s = 0; s < ThreadMap::Iterations::kStrided; ++s) {
 
+      // === 步骤3.1: 双缓冲指针选择 ===
+      // 使用 s & 1 实现双缓冲机制：偶数迭代使用pointer_[0]，奇数迭代使用pointer_[1]
+      // 这是tensor core操作中常见的优化技术，用于隐藏内存访问延迟
+      // 当一个缓冲区在进行内存访问时，另一个缓冲区可以同时进行计算
       AccessType *access_ptr = pointer_[s & 1];
+      
+      // === 步骤3.2: 计算Strided索引 ===
+      // s & ~1 将奇数索引转换为对应的偶数索引
+      // 例如：s=0→stride_idx=0, s=1→stride_idx=0, s=2→stride_idx=2, s=3→stride_idx=2
+      // 这种模式配合双缓冲，确保相邻的两次迭代使用不同的缓冲区但具有相似的stride模式
       int stride_idx = (s & ~1);
 
+      // === 步骤4: 内层循环 - 遍历Contiguous维度 ===
+      // Contiguous维度通常对应矩阵的列方向或连续内存方向
+      // 这个循环处理每个strided位置上的所有连续元素
       CUTLASS_PRAGMA_UNROLL
       for (int c = 0; c < ThreadMap::Iterations::kContiguous; ++c) {
 
+        // === 步骤4.1: 计算详细的内存访问偏移量 ===
+        // 这是一个复合偏移量计算，包含三个部分：
+        // 1. stride_idx * ThreadMap::Delta::kStrided * stride_: 
+        //    Strided维度的基础偏移，stride_是内存布局中行间的跨步
+        // 2. c * ThreadMap::Delta::kContiguous / ThreadMap::kElementsPerAccess:
+        //    Contiguous维度的偏移，除以kElementsPerAccess是因为使用向量化访问
+        // 3. vec_pointer_offset: 
+        //    外部传入的额外偏移量（已转换为向量化单位）
         int access_offset = stride_idx * ThreadMap::Delta::kStrided * stride_ +
           c * ThreadMap::Delta::kContiguous / ThreadMap::kElementsPerAccess +
           vec_pointer_offset;
 
+        // === 步骤4.2: 计算Fragment中的数据索引 ===
+        // 将二维的(s,c)坐标转换为一维的线性索引
+        // 这个索引用于从fragment中提取对应位置的数据
         int access_idx = c + s * ThreadMap::Iterations::kContiguous;
 
+        // === 步骤4.3: 计算最终的字节级内存地址 ===
+        // 首先计算基础地址：access_ptr + access_offset
+        // 然后转换为字节指针，以便进行精确的字节级偏移调整
         char *access_byte_ptr = reinterpret_cast<char *>(access_ptr + access_offset);
 
+        // === 步骤4.4: 执行实际的内存存储操作 ===
+        // 1. access_byte_ptr + byte_offset_: 添加字节级偏移量，处理内存对齐等细节
+        // 2. reinterpret_cast<AccessType *>(...): 转换回AccessType指针类型
+        // 3. *(...) = frag_ptr[access_idx]: 将fragment中的数据写入计算出的内存位置
+        //
+        // 这个操作是整个函数的核心：将寄存器中的fragment数据高效地存储到内存中
         *reinterpret_cast<AccessType *>(access_byte_ptr + byte_offset_) = frag_ptr[access_idx];
       }
     }
+    
+    // === 函数执行流程总结 ===
+    // 1. 数据预处理：将fragment转换为向量化访问格式
+    // 2. 双重循环遍历：外层处理strided维度，内层处理contiguous维度  
+    // 3. 双缓冲优化：使用两个指针交替访问，隐藏内存延迟
+    // 4. 复杂寻址：综合考虑stride、向量化、偏移等因素计算精确内存地址
+    // 5. 高效存储：使用向量化指令将数据从寄存器写入内存
+    //
+    // 这种设计在GPU上能够充分利用内存带宽和tensor core的高性能特性
   }
 
   /// Store a fragment to memory

@@ -237,6 +237,7 @@ K │ Stage 0 │
   {
       // 步骤1: 将共享内存写入迭代器前进到下一个tile位置
       // 这会让迭代器指向共享内存中的下一个写入位置
+      // 这里其实是++(this->smem_iterator_A_)的意思
       ++this->smem_iterator_A_;    // A矩阵迭代器前进
       ++this->smem_iterator_B_;    // B矩阵迭代器前进
 
@@ -377,6 +378,9 @@ K │ Stage 0 │
 
     // Store A and B fragments to shared
     this->smem_iterator_A_.store(transform_A_(tb_frag_A));// 这里就是将reg中的数据搬到smem，这里transform A主要做强制类型转换
+    // 这里问cursor为什么使用this指针，cursor说其实这里也可以不使用this指针，因为smem_iterator_B_就是MmaPipelined的一个成员变量，所以直接smem_iterator_B_.store也可以
+    // 但这里之所以还要加上this指针，应该是为了代码风格统一，因为后面还有个warp_tile_iterator_A_使用了this指针，而warp_tile_iterator_A_使用this指针的原因和smem_iterator_B_不一样，但这里
+    // 应该是为了和warp_tile_iterator_A_风格保持统一，所以加上了this指针
     this->smem_iterator_B_.store(transform_B_(tb_frag_B));
 
     // Advance write stage
@@ -465,6 +469,10 @@ void gemm_iters(
   // [kgroup 0][kgroup 1][kgroup 2][kgroup 3]
   //    ↑
   //  从这里开始
+  /**
+  说一下这里为什么使用this指针（注意和smem_iterator_A_使用this指针的情况区分），cursor是这样说的，因为warp_tile_iterator_A_是定义在基类MmaBase中的，而MmaBase是一个模板类，其中warp_tile_iterator_A_也使用到了模板传参
+  所以在MmaBase的模板未实例化之前，是不知道warp_tile_iterator_A_是什么类型的，即这里的warp_tile_iterator_A_是一个依赖名称，在派生类中使用基类中定义的依赖名称，需要加上this指针
+   */
   this->warp_tile_iterator_A_.set_kgroup_index(0);
   // 从共享内存加载第一个A fragment到warp_frag_A[0]
   // 这是寄存器双缓冲的初始化，为主循环做准备
