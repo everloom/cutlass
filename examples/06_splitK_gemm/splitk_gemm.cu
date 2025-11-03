@@ -107,6 +107,76 @@ arguments created to initialize CUTLASS kernel then, the kernel is launched.
 
 In this example, we later on launch a reference gemm kernel (from CUTLASS utilities) to compare if
 the output from CUTLASS kernel is same as reference GEMM kernel.
+
+
+这个示例展示了如何使用CUTLASS提供的函数和数据结构来使用split-k版本的矩阵乘法；
+我们在NVIDIA Volta GPU上运行这个示例。
+
+什么是split-k？
+考虑一个问题规模为M = 128, N = 128, K = 4096。在这种情况下，如果我的线程块瓦片大小
+（瓦片可以视为一个2D矩阵）是128x128x4096，那么我们启动单个线程块，只占用V100上84个SM
+中的一个SM。因此计算效率非常低。那么如何解决？这就是split-k的用武之地。它是一种
+对矩阵乘法的K维度进行分割并分布到多个SM上的方法，从而获得比单个SM更好的效率。在上面
+的例子中，我们可以用split-k因子16来分割K维度，即线程块瓦片大小将是128x128x256，
+并将在16个SM上启动。一旦每个线程块计算出它们的部分内积（输出的1/16），它们就累加到
+单个输出矩阵中。
+
+编写单个高性能矩阵乘法kernel是困难但可行的。而编写大规模的高性能kernel，能够以良好
+的抽象为多种问题规模工作，这真的很困难。CUTLASS通过提供简化的抽象来组合GEMM kernel
+的多个部分来解决这个问题。当正确使用时，这些kernel可以轻松达到GPU的峰值性能。
+
+CUTLASS将kernel分为分层的可组合部分。这意味着，在每个线程、warp和线程块级别，它们
+在自己的瓦片大小上计算，较高级别的瓦片大小由较低级别的瓦片组成。多个线程瓦片（每个
+线程计算的瓦片大小）可以用来形成warp瓦片（每个warp计算的瓦片大小），多个warp瓦片
+可以用来计算线程块瓦片（一个线程块计算的瓦片大小）。
+
+在这个示例中，我们将变量初始化分为：
+1. 设置数据属性：描述矩阵在内存中的布局方式以及kernel如何查看它们（逻辑到物理的映射）
+2. 设置计算属性：描述如何使用上述设置的矩阵来计算矩阵乘法的输出。
+
+首先，我们设置矩阵A、B、C和D的数据类型以及alpha、beta，因为GEMM的方程式是
+D = alpha * A * B + beta * C。在CUTLASS中，kernel首先计算A * B，并将其余计算留到
+kernel的末尾，因为alpha * X + beta * C是对X（A * B）和C的简单逐元素操作。我们称之为
+kernel的后处理（epilogue）。因此，我们将alpha和beta的数据类型设置为等于
+ElementComputeEpilogue = float。由于我们想在Volta上使用MMA指令，而它们只支持半精度
+浮点（fp16或half），我们对输入矩阵A和B中的元素使用cutlass::half_t数据类型。Volta
+还支持将部分点积累加到fp32，这可以存储更宽范围的数字，我们将其用作输出矩阵元素和
+累加的数据类型。我们通过初始化模板变量ElementAccumulator（float）、
+ElementComputeEpilogue（float）、ElementInputA（cutlass::half_t）、
+ElementInputB（cutlass::half_t）、ElementOutput（float）来向CUTLASS kernel传达这一点。
+仅仅传达数据类型是不够的。由于数据在内存中是线性布局的，我们必须传达矩阵的布局。
+我们通过将模板变量LayoutInputA初始化为列主序cutlass变量、LayoutInputB为行主序、
+LayoutOutput为行主序来做到这一点。接下来，我们设置计算alpha * X + beta * C的规则，
+这被称为kernel的后处理。我们初始化模板变量EpilogueOp，它接受输出ElementOutput（float）
+的数据类型、每个向量内存访问的元素数量（16）、累加器的数据类型（float）和线性组合
+（alpha * X + beta * C）计算的数据类型。
+
+现在我们设置了数据的属性，我们必须设置计算的属性。
+
+其次，我们创建线程块、warp和mma-op的瓦片大小的模板变量，分别为128x128x32、64x64x4、
+8x8x4（MxNxK）。当传递给实例化CUTLASS GEMM kernel时，它内部推导出每个线程块所需的
+线程数量、共享内存量、以无bank冲突的方式存储数据，以及组成、初始化和启动高性能GEMM 
+kernel所需的大量其他变量。这就是CUTLASS的美妙之处，它使开发者免于理解和编码复杂的
+硬件优化，这些优化很容易出错。
+
+还有一些其他初始化的模板变量，例如，输出矩阵的哪个线程块瓦片由在SM上启动的哪个线程块
+完成，您想要运行的GPU的CUDA SM架构。
+
+这些都被放在一起，使用cutlass::gemm::device::GemmSplitKParallel模板创建一个描述
+CUTLASS GEMM kernel的模板变量。
+
+下一步是初始化物理数据、实例化和初始化CUTLASS kernel并运行它。我们使用CUTLASS工具
+来初始化、填充、比较矩阵，因为它们简单且不会妨碍学习CUTLASS。
+
+一旦所有矩阵都被初始化并填充了数据，创建参数元组来启动CUTLASS kernel，它接受问题
+规模（M = 5120, N = 4096和K = 4096）、矩阵、alpha、beta和重要的split k维度因子。
+除此之外，我们查询CUTLASS是否需要我们实例化的kernel所需的任何临时空间内存。如果是，
+我们创建它并与创建的其他参数一起传递以初始化CUTLASS kernel，然后启动kernel。
+
+在这个示例中，我们稍后启动一个参考GEMM kernel（来自CUTLASS工具）来比较CUTLASS 
+kernel的输出是否与参考GEMM kernel相同。
+
+
 */
 
 #include <iostream>
