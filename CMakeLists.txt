@@ -317,8 +317,8 @@ endif()
 
 # Don't leak lineinfo in release builds
 if (NOT CMAKE_BUILD_TYPE MATCHES "Release")
-  list(APPEND CUTLASS_CUDA_CLANG_FLAGS -gmlt)
-  list(APPEND CUTLASS_CUDA_NVCC_FLAGS -lineinfo)
+  list(APPEND CUTLASS_CUDA_CLANG_FLAGS -gmlt -g -O0)
+  list(APPEND CUTLASS_CUDA_NVCC_FLAGS -G -g -O0 )
 endif()
 
 #Report CUDA build flags
