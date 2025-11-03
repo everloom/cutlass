@@ -77,12 +77,27 @@ struct DefaultGemmConfiguration<
   ElementB, 
   ElementC, 
   ElementAccumulator> {
-  
+
+  // 下面有很多模版的 kAlignment = 128 / sizeof_bits<Element_type>::value
+  // kAlignment定义了访存的内存对齐要求，即矩阵的起始地址需要向多大的数对齐
+  // 这里不以这个模版的kAlignmentA = 1解释kAlignment的含义，而是按照下面模版的kAlignment = 128 / sizeof_bits<Element_type>::value解释
+  // 首先这里的128表示，内存访问地址需要对齐128bit(16个byte)
+  // 然后这里需要计算，在128位对齐的情况下，包含了多少个当前element type的数，即kAlignment
+  // 之所以要算kAlignment，是因为cutlass还是以元素为单位工作的，而不是以byte或者bit为单位工作
+  // 矩阵的起始地址向kAlignment对齐了（对齐了128bit），那么从矩阵中第一次取数后，第二次、第三次取数也肯定对齐了128bit
+  // 例如使用cp.async读取type为bf16的数据，cp.async最大能一次读取16byte（128bit），所以这里kAignment就为 128 / 16 = 8 
   static int const kAlignmentA = 1;
   static int const kAlignmentB = 1;
+  // threadblock tile shape
   using ThreadblockShape = GemmShape<128, 128, 8>;
+  // warp tile shape
   using WarpShape = GemmShape<32, 64, 8>;
+  // 问了下cursor，说这个参数的含义是，定义了单条指令可以执行的矩阵乘法运算的大小
+  // 对于simt，就是GemmShape<1,1,1>
+  // 对于tensorcore，这里就是mma指令的计算大小了，例如GemmShape<16,8,16>
+  // 下面有许多模版的InstructionShape就是tensorcore的
   using InstructionShape = GemmShape<1, 1, 1>;
+  // 这里表示double buffer，即cutlass中最简单的gemm都是使用了double buffer的
   static int const kStages = 2;
 
   using EpilogueOutputOp = epilogue::thread::LinearCombination<
