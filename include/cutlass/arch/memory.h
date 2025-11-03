@@ -338,6 +338,8 @@ struct global_load<AccessType,
                   > {
   CUTLASS_DEVICE
   global_load(AccessType &D, void const *ptr, bool pred_guard) {
+    // 下面这句话的作用是，将通用的 void* 地址 ptr 转换为一个具体的、带访问粒度的类型指针（如 float*）
+    // 然后解引用这个新指针，从全局内存中加载数据。将加载的数据存入目标寄存器 D
     if (pred_guard) D = *(reinterpret_cast<AccessType const *>(ptr));
   }
 };
