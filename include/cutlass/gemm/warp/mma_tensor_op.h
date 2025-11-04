@@ -337,6 +337,7 @@ public:
       // Right Left Right Left 
 
       CUTLASS_PRAGMA_UNROLL
+      // 在b站up的cutlass课程v3的代码中，这里MmaIterations::kRow为8，MmaIterations::kColumn也为8，所以这里会执行8*8次mma
       for (int m = 0; m < MmaIterations::kRow; ++m) {
 
         CUTLASS_PRAGMA_UNROLL
@@ -350,7 +351,7 @@ public:
               ptr_A[m],
               ptr_B[n_serpentine],
               ptr_D[n_serpentine + m * MmaIterations::kColumn]);
-          } else {
+          } else {// 这里mma其实就是之前学过的那个什么mma.sync.aligned.....的那个mma指令。相当于cutlass执行到这里的时候，已经执行到最最底层了，走到头了
             mma(ptr_D[m + n_serpentine * MmaIterations::kRow],
                 ptr_A[m],
                 ptr_B[n_serpentine],
