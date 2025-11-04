@@ -166,6 +166,12 @@ namespace device {
     >
     class Gemm;
 */
+
+/**
+下面可以看到两个class Gemm的定义，其中第一个是Gemm主模板，第二个是主模板的偏特化
+然后第二个偏特化的Gemm中，是采用组合/转发的方式来使用主模板中定义的方法的
+关于主模板、偏特化、组合转发的内容，参考“学习cutlass时的C++知识点.docx”
+ */
 template <
     /// Element type for A matrix operand
     typename ElementA_,
@@ -687,7 +693,7 @@ class Gemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
   };
 
 private:
-
+// 在类/对象初始化的时候，这个私有成员变量就会被初始化
   UnderlyingOperator underlying_operator_;
 
 public:
