@@ -50,9 +50,11 @@ template <int Contiguous, int Strided>
 class PitchLinear {
 public:
   /// Logical rank of tensor
+  // 表示这个layout是一个2d的
   static int const kRank = 2;
 
   /// Rank of stride vector
+  // 表示连续维度的跨步为1
   static int const kStrideRank = 1;
 
   /// Index type used for coordinates
