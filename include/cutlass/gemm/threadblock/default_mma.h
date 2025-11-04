@@ -370,6 +370,7 @@ struct DefaultMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB,
     "Alignment must match thread data map's vector length");
 
   // Define iterators over tiles from the A operand
+  // 这里传入的MmaCore::Shape::kM和MmaCore::Shape::kK就是threadblock tile的shape的kM和kK
   using IteratorA = cutlass::transform::threadblock::PredicatedTileIterator<
       cutlass::MatrixShape<MmaCore::Shape::kM, MmaCore::Shape::kK>, ElementA,
       LayoutA, 1, typename MmaCore::IteratorThreadMapA>;
