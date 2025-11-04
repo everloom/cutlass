@@ -111,7 +111,7 @@ struct Gemm {
       int const *scatter_D_indices = nullptr
     ):
       problem_size(problem_size),
-      grid_tiled_shape(grid_tiled_shape),
+      grid_tiled_shape(grid_tiled_shape), // grid_tiled_shape就是原始的grid的shape，还没有经过threadblock swizzle
       swizzle_log_tile(ThreadblockSwizzle().get_log_tile(grid_tiled_shape)),
       params_A(ref_A.layout()),
       ref_A(ref_A),
@@ -130,7 +130,9 @@ struct Gemm {
       int gemm_k_iterations = (total_gemm_k_iterations + grid_tiled_shape.k() - 1) / grid_tiled_shape.k();
       
       gemm_k_size = gemm_k_iterations * Mma::Shape::kK;
-
+      // 这里gemm_k_size实际上就是在K维度上的problem_size.k() / grid_tiled_shape.k()，问了cursor，说之所以这里采取
+      // 上面三行公式来算，因为要求算出来的gemm_k_size是Mma::Shape::kK的倍数
+      // 还有就是，对于非split k场景，这里gemm_k_size就是problem_size.k()(此时grid_tiled_shape.k() = 1, )
     semaphore = workspace;
     }
   };
@@ -217,21 +219,26 @@ struct Gemm {
 
     // Compute initial location in logical coordinates
     cutlass::MatrixCoord tb_offset_A{
-      threadblock_tile_offset.m() * Mma::Shape::kM,
-      threadblock_tile_offset.k() * params.gemm_k_size,
+      threadblock_tile_offset.m() * Mma::Shape::kM, // Mma::Shape::kM就是threadblock tile的M的大小
+      threadblock_tile_offset.k() * params.gemm_k_size, // 对于非splitk场景，threadblock_tile_offset.k() = 0, params.gemm_k_size = problem_size.k()
     };
 
     cutlass::MatrixCoord tb_offset_B{
       threadblock_tile_offset.k() * params.gemm_k_size,
-      threadblock_tile_offset.n() * Mma::Shape::kN
+      threadblock_tile_offset.n() * Mma::Shape::kN // Mma::Shape::kN就是threadblock tile的N的大小
     };
 
     // Problem size is a function of threadblock index in the K dimension
+    // 计算当前threadblock需要处理的K维度范围的实际大小
+    // 这在split-K优化中特别重要，每个threadblock只处理K维度的一部分
+    // min确保不会超出原始矩阵的K维度边界
     int problem_size_k = min(
-      params.problem_size.k(), 
-      (threadblock_tile_offset.k() + 1) * params.gemm_k_size);
+      params.problem_size.k(),  // 原始矩阵的K维度大小
+      (threadblock_tile_offset.k() + 1) * params.gemm_k_size); // 当前threadblock的K维度上界
 
     // Compute threadblock-scoped matrix multiply-add
+    // 这里tb_offset_A.column()就是上面的threadblock_tile_offset.k() * params.gemm_k_size，非splik场景下结果为0
+    // 这里gemm_k_iterations就是在整个K维度上，Mma的迭代次数
     int gemm_k_iterations = (problem_size_k - tb_offset_A.column() + Mma::Shape::kK - 1) / Mma::Shape::kK;
 
     // Compute position within threadblock
@@ -256,6 +263,9 @@ struct Gemm {
 
     // Broadcast the warp_id computed by lane 0 to ensure dependent code
     // is compiled as warp-uniform.
+    // canonical_warp_idx_sync()这个函数其实就是__shfl_sync(0xffffffff, threadIdx.x / 32, 0);
+    // 这句话的作用是，将一个warp中的第0号线程的threadIdx.x / 32的值赋值给这个warp中的所有线程
+    // 这句话等价于int warp_idx = threadIdx.x / 32，不过如果使用__shfl_sync来实现的话，有两个好处：1、shuffle操作更除法更快 2、减少了31次除法操作
     int warp_idx = canonical_warp_idx_sync();
     int lane_idx = threadIdx.x % 32;
 
@@ -264,6 +274,8 @@ struct Gemm {
     //
 
     // Construct thread-scoped matrix multiply
+    // 构造threadblock级别的矩阵乘法对象
+    // 这个对象封装了所有的双缓冲流水线逻辑、共享内存管理、warp级MMA操作
     Mma mma(shared_storage.main_loop, thread_idx, warp_idx, lane_idx);
 
     typename Mma::FragmentC accumulators;
@@ -278,13 +290,16 @@ struct Gemm {
     //
     // Epilogue
     //
-
+    // 到了这里，mma的结果就已经计算完了，并且结果存在了FragmentC中，这里是对FragmentC的结果进行一些后处理操作，例如计算D=alpha*A*B + beta*C，前面的mma就是A*B，这里epilogue就是算alpha*A*B + beta*C
+    // 创建输出操作对象，负责执行 D = alpha * (A * B) + beta * C 的线性组合
+    // output_op封装了alpha、beta参数以及各种激活函数（如ReLU）
     OutputOp output_op(params.output_op);
 
     //
     // Masked tile iterators constructed from members
     //
-
+    // 重新计算threadblock偏移（为epilogue阶段准备）
+    // 确保与主计算阶段使用相同的tile位置
     threadblock_tile_offset =
         threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
 
@@ -310,6 +325,8 @@ struct Gemm {
     }
 
     // Tile iterator loading from source tensor.
+    // 这里的iterator_C就是上提到的D=alpha*A*B + beta*C中的C的迭代器，此时C还在gmem中
+    // 构造访问输入矩阵C的迭代器，C是线性组合中的加法项
     typename Epilogue::OutputTileIterator iterator_C(
       params.params_C,
       params.ref_C.data(),
@@ -320,6 +337,8 @@ struct Gemm {
     );
 
     // Tile iterator writing to destination tensor.
+    // 这里D就是D=alpha*A*B + beta*C中的结果D，D需要写到gmem中，D的迭代器就是iterator_D
+    // 构造写入输出矩阵D的迭代器，D是最终的计算结果
     typename Epilogue::OutputTileIterator iterator_D(
       params.params_D,
       params.ref_D.data(),
@@ -328,7 +347,8 @@ struct Gemm {
       threadblock_offset,
       params.scatter_D_indices
     );
-
+    // 构造epilogue处理器，负责执行线性组合和结果写回
+    // epilogue也有自己的共享内存需求和线程协作模式
     Epilogue epilogue(
       shared_storage.epilogue, 
       thread_idx, 
@@ -348,6 +368,7 @@ struct Gemm {
     }
 
     // Execute the epilogue operator to update the destination tensor.
+    // 执行epilogue计算
     epilogue(output_op, iterator_D, accumulators, iterator_C); 
     
     //
