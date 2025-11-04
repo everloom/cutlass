@@ -364,6 +364,7 @@ public:
   }
 
   /// Advances to the next tile in memory.
+  // 对这个函数的理解可以参考include/cutlass/transform/threadblock/predicated_tile_iterator.h中PredicatedTileIterator operator++(int)的注释
   CUTLASS_HOST_DEVICE
   RegularTileIterator operator++(int) {
 
