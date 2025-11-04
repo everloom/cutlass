@@ -136,6 +136,10 @@ struct DefaultMmaCore<Shape_, WarpShape_, InstructionShape_, double,
   static int const kThreads = WarpCount::kCount * kWarpSize;
 
   /// Size of a threadblock-scoped access
+  // 这里参数表示线程一次访问的bit大小
+  // 这个模版是针对double类型做的特化，所以这里是64bit，下面模版这里基本都是128bit
+  // 在default_gemm_configuration.h的模版中有个kAlignment，要求所有读取数据的地址向128bit对齐
+  // 但这里一次访问64bit，我理解应该在哪里有额外的根据kAlignment做内存对齐128位的操作，不过这里我没有深究
   static int const kAccessSizeInBits = 64;
 
   /// Default Operator
