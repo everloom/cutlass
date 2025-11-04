@@ -108,7 +108,8 @@ template <
     bool IsComplex = false // (is_complex<ElementA>::value || is_complex<ElementB>::value)
 >
 struct DefaultMmaCore;
-
+// 这里的DefaultMmaCore是一个主模版
+// 使用时，真正调用的是特化的实现，例如如果是sm80的，则调用default_mma_core_sm80.h中的特化实现
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace threadblock
