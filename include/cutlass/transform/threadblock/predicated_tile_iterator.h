@@ -151,6 +151,9 @@ class PredicatedTileIterator;
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
+
+// 这里是对PitchLinear的layout进行的特化
+// 这里AdvanceRank表示迭代器在哪个维度上推进(0表示contiguous维度，1表示strided维度)
 template <typename Shape_, typename Element_, int AdvanceRank,
           typename ThreadMap_, int AccessSize, bool Gather, typename PermuteLayout>
 class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
@@ -287,6 +290,40 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
     return *this;
   }
 
+
+  /********************************************************************************************************************
+  ********************************************************************************************************************
+  ********************************************************************************************************************
+  详细解释一下下面这个函数
+  函数传参的(int): 这个匿名的 int 参数是 C++ 用来区分 后缀自增 和 前缀自增 的语法标志。编译器看到这个 int，就知道这是为 it++ 这种形式准备的。而前缀自增 ++it 的函数签名则是 operator++()，没有参数。
+  
+  PredicatedTileIterator self(*this);这一行的this是一个指向当前对象实例的指针。*this: 解引用 this 指针，得到当前 PredicatedTileIterator 对象本身。
+  所以PredicatedTileIterator self(...): 即创建一个新的 PredicatedTileIterator 对象，命名为 self。
+  self(*this): 调用 拷贝构造函数 (Copy Constructor)，用当前对象 *this 的所有状态（指针、偏移量等）来初始化新对象 self。
+  结果就是：self 成为了当前迭代器状态的一个完整、独立的快照。它保存了迭代器在被修改之前的样子。
+
+  operator++();
+  它没有参数，因此这是在显式地调用同一个类中定义的 前缀自增运算符 operator++()。调用的是第 341 行的函数 (PredicatedTileIterator &operator++())。
+  这个调用 operator++() 没有任何参数。因此，它唯一能匹配上的就是那个没有参数的 operator++() 版本，也就是第 341 行定义的前缀自增运算符。
+  所有将迭代器实际向前推进的复杂逻辑（比如更新指针、增加偏移量、重新计算掩码等）都封装在前缀 operator++() 函数中。
+  通过调用它，当前对象 (*this) 的状态被更新，它现在已经指向了下一个位置。
+
+  return self;
+  这一行完成了后缀自增的第二个要求。它返回的是 self 对象，也就是我们在第一步中创建的、代表迭代器 原始状态 的那个快照。
+  它返回的是一个值（a copy），而不是一个引用，这符合后缀自增的语义。
+
+  所以整个函数的流程可以这样理解
+  当你写下 auto old_iterator = iterator++; 时，编译器会执行以下操作：
+  1、进入 operator++(int) 函数。
+  2、备份：创建一个 iterator 的副本，我们称之为 self。
+  3、前进：调用 operator++()，让 iterator 自身前进到下一个位置。
+  4、返回备份：函数返回 self，这个返回值被赋给 old_iterator。
+  执行完毕后，old_iterator 保存了 iterator 开始时的位置，而 iterator 本身已经移动到了下一个位置。这种设计既高效又优雅，是 C++ 标准库和高性能代码库中实现运算符的通用模式。
+   ***********************************************************************************************************************
+   ***********************************************************************************************************************
+   ***********************************************************************************************************************
+   */
+
   /// Advances to the next tile in memory.
   ///
   /// The first time this method is called, predicates are updated, and the
@@ -322,6 +359,7 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
   }
 
   CUTLASS_DEVICE
+  // 这里是专门针对PitchLinear的layout而特化的load_with_byte_offset
   void load_with_byte_offset(Fragment &frag, LongIndex byte_offset) {
 
     AccessType *frag_ptr = reinterpret_cast<AccessType *>(&frag);
@@ -403,6 +441,9 @@ class PredicatedTileIterator<Shape_, Element_, layout::PitchLinear, AdvanceRank,
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
+
+// 下面这个类针对ColumnMajor特化
+// 这里AdvanceRank表示迭代器在哪个维度上推进(0表示contiguous维度，1表示strided维度)
 template <
   typename Shape_,
   typename Element_,
@@ -621,6 +662,8 @@ public:
 ///            WriteableContiguousTileIteratorConcept |
 ///            MaskedTileIteratorConcept
 ///
+
+// 下面这个类针对RowMajor特化
 template <
   typename Shape_,
   typename Element_,
