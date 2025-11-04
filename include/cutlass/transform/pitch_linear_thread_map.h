@@ -61,6 +61,10 @@ namespace transform {
 ///
 /// This ThreadMap is used by SIMT kernels and operand E of the sparse tensor
 /// kernels.
+// 将一个pitch-linear瓦片在给定数量的线程中进行条带挖掘，首先沿着连续维度，然后沿着跨步维度。
+// 瓦片必须能被线程数整除，这样所有线程都可以执行相同数量的迭代，使用相同的增量来详尽地覆盖整个瓦片。
+// 这个类满足"RegularThreadMapping"概念。
+// 这个ThreadMap被SIMT内核和稀疏张量内核的操作数E使用。
 template <
   typename Shape_,
   int Threads,
@@ -72,12 +76,22 @@ struct PitchLinearStripminedThreadMap {
   using TensorCoord = layout::PitchLinearCoord;
 
   /// Tile shape
+  // 应该是threadblock tile的shape
   using Shape = Shape_;
 
   /// Number of threads total
+  // 这里是一个block有多少线程
   static int const kThreads = Threads;
 
   /// Extract vector length from Layout
+  /*
+  kElementsPerAccess定义了每个线程的每次访存的个数，也即定义了每个线程的向量化访存的数据个数
+  这里以default_mma_core_sm80.h为例讲一下, 这个代码中会对sm80下的PitchLinearStripminedThreadMap做初始化
+  然后文件中有很多DefaultMmaCore的特化，其中基本DeafultMmaCore中在使用PitchLinearStripminedThreadMap模版时，这里的
+  ElementsPerAccess传入的是kAccessSizeInBits / sizeof_bits<ElementA>::value>，其中kAccessSizeInBits在default_mma_core_sm80.h只有
+  64和128的情况，cursor说之所以只能是这两个值是因为刚好对应了 8 / 16个byte，对合并访存更友好
+  所以这里每个线程向量化访存的大小不是64bit就是128bit
+  */
   static int const kElementsPerAccess = ElementsPerAccess;
 
   /// Shape of access by each thread
@@ -89,23 +103,75 @@ struct PitchLinearStripminedThreadMap {
     static_assert(!(Shape::kContiguous % kElementsPerAccess), "");
 
     /// Shape of the tile in units of vectors
+    // 因为每个thread向量化访存kElementsPerAccess个数(64bit或者128bit)
+    // 所以这里需要对threadblock tile做一下调整，调整为向量化访存的tile shape
+    // 例如原始瓦片：Shape<64, 4>（64×4个元素）
+    // 假设kElementsPerAccess = 2（一个访问两个数，数的type是int还是float根据你自己定义）
+    // 向量化后的tile shape：ShapeVec<32, 4>（32×4个向量，每个向量2个元素）
     using ShapeVec = layout::PitchLinearShape<
       Shape::kContiguous / kElementsPerAccess,
       Shape::kStrided
     >;
-
+    /*
+    这里的断言做了这样的事情：
+    1、当block的线程数小于向量化后的tile shape的连续维度大小时，需要满足向量化的tile shape的连续维度大小能整除block的thread数
+    2、当block的线程数大于向量化后的tile shape的连续维度大小时，需要满足block的thread数量能整除向量化的tile shape的连续维度大小
+    */
     static_assert((Threads < ShapeVec::kContiguous && !(ShapeVec::kContiguous % kThreads)) ||
                       (!(kThreads % ShapeVec::kContiguous)),
                   "Shape must be divisible by number of iterations of each thread.");
   };
 
+  /*
+  下面这个表达式比较复杂，这里解释一下（来自cursor）
+
+  整体结构：
+      using Iterations = typename platform::conditional<
+        条件,
+        类型A,
+        类型B
+      >::type;
+    这是一个编译期类型选择，相当于：
+      if (条件) {
+        Iterations = 类型A;
+      } else {
+          Iterations = 类型B;
+      }
+
+  具体分解：
+    1、条件判断，判断线程数是否足够覆盖连续维度
+      Threads >= Detail::ShapeVec::kContiguous
+    2、类型A（线程数充足时）
+      layout::PitchLinearShape<
+        1,  // 连续维只需1次迭代
+        复杂表达式  // 跨步维需要的迭代次数
+      >
+    3、复杂表达式详解：
+        (Detail::ShapeVec::kStrided + (kThreads / Detail::ShapeVec::kContiguous - 1)) /
+        (kThreads / Detail::ShapeVec::kContiguous)
+      这是在计算向上取整除法：ceil(kStrided / (kThreads/kContiguous))
+      kThreads / kContiguous：每个跨步维"行"分配多少线程
+      kStrided / (kThreads/kContiguous)：跨步维需要多少轮迭代
+      + (除数 - 1) 然后 / 除数：这是整数向上取整的经典技巧
+      而(Threads >= Detail::ShapeVec::kContiguous ? 表达式 : 0)，注释解释了：某些编译器会同时实例化conditional的两个分支，如果直接写除法可能在"不该执行的分支"上遇到除零错误，所以用三元运算符再次保护。
+    4、类型B（线程数不足时）
+      layout::PitchLinearShape<
+          Detail::ShapeVec::kContiguous / kThreads,  // 连续维需要多轮
+          Detail::ShapeVec::kStrided                 // 跨步维保持原样
+      >
+  */
   /// Number of iterations by each thread
+  // iterations中包含连续维的结果和跨步维的结果，假设连续维为1，跨步维为32
+  // 则表示一个线程，在连续维迭代一次，在跨步维迭代32次
+  // 如果看不懂就看cutlass.md，上面这块有讲
   using Iterations = typename platform::conditional<
       Threads >= Detail::ShapeVec::kContiguous,
       layout::PitchLinearShape<
           1,
           // Redo the comparison here to work around divide by zero compiler
           // error.  The compiler evaluates both path of platform::conditional.
+          // 在这里重新进行比较以解决编译器除零错误的问题。
+          // 编译器会评估 platform::conditional 的两个路径。
           (Threads >= Detail::ShapeVec::kContiguous
                ? (Detail::ShapeVec::kStrided + (kThreads / Detail::ShapeVec::kContiguous - 1)) /
                      (kThreads / Detail::ShapeVec::kContiguous)
@@ -116,6 +182,7 @@ struct PitchLinearStripminedThreadMap {
 
   /// Interval between accesses along each dimension of the tensor's logical coordinate space
   /// (in units of Elements)
+  /// 沿着张量逻辑坐标空间每个维度的访问间隔（以元素为单位）
   using Delta = typename platform::conditional<
     Threads >= Detail::ShapeVec::kContiguous,
     layout::PitchLinearShape<
@@ -129,6 +196,7 @@ struct PitchLinearStripminedThreadMap {
   >::type;
 
   /// Shape of the tile in units of vectors
+  /// 以向量为单位的tile形状
   using StorageShape = typename platform::conditional<
       Threads >= Detail::ShapeVec::kContiguous,
       layout::PitchLinearShape<Shape::kContiguous,
@@ -137,6 +205,7 @@ struct PitchLinearStripminedThreadMap {
 
   /// Maps thread ID to a coordinate offset within the tensor's logical coordinate space
   /// (in units of Elements)
+  /// 将线程ID映射到张量逻辑坐标空间中的坐标偏移（以元素为单位）
   CUTLASS_HOST_DEVICE
   static TensorCoord initial_offset(int thread_id) {
     return TensorCoord(
