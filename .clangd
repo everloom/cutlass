@@ -1,0 +1,14 @@
+# 注意，cutlass库只生成compile_commands.json文件还无法实现clangd的跳转，还需要这个.clangd文件才行
+# 这个文件里面的内容根据cutlass仓库的具体路径进行更改
+CompileFlags:
+  Add:
+    - -I/home/p/Workspace/code/cuda_learn/cutlass/include
+    - -I/home/p/Workspace/code/cuda_learn/cutlass/examples/common
+    - -I/home/p/Workspace/code/cuda_learn/cutlass/build/include
+    - -I/usr/local/cuda/include
+    - -I/home/p/Workspace/code/cuda_learn/cutlass/tools/util/include
+    - --cuda-gpu-arch=sm_86 # 这里更换成当前gpu的sm架构
+  Remove:
+    - --options-file*
+    - -forward-unknown-to-host-compiler
+
