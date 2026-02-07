@@ -43,6 +43,8 @@
 
 #include "cutlass/gemm/device/default_gemm_configuration.h"
 #include "cutlass/epilogue/thread/linear_combination_relu.h"
+#include "cutlass/epilogue/thread/linear_combination_mish.h"
+#include "cutlass/epilogue/thread/linear_combination_hardswish.h"
 
 #include "kernel/b2b_gemm.h"
 #include "kernel/default_b2b_gemm.h"

@@ -79,7 +79,7 @@ bool run_nonfused_gemm_f16_sm80() {
     ThreadblockShape0,
     WarpShape0,
     InstructionShape,
-    cutlass::epilogue::thread::LinearCombinationRelu<
+    cutlass::epilogue::thread::LinearCombinationMish<
       ElementOutput,
       128 / cutlass::sizeof_bits<ElementOutput>::value,
       ElementAccumulator,
@@ -102,7 +102,7 @@ bool run_nonfused_gemm_f16_sm80() {
     ThreadblockShape1,
     WarpShape1,
     InstructionShape,
-    cutlass::epilogue::thread::LinearCombinationRelu<
+    cutlass::epilogue::thread::LinearCombinationMish<
       ElementOutput,
       128 / cutlass::sizeof_bits<ElementOutput>::value,
       ElementAccumulator,
@@ -143,8 +143,25 @@ bool run_fused_gemm_f16_sm80_shmem() {
   using WarpShape1 = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
 
+  /*
+  下面两个epilogue模版类的传入模版参数的第二个参数表示一个thread处理的元素个数
+  可以看到epilogue0和1的这个参数的大小不相同
+  epilogue0设置为InstructionShape::kM * InstructionShape::kN / 32(这里结果为4)的原因：
+  首先InstructionShape::kM * InstructionShape::kN表示一个warp的mma计算得到的结果的数据大小
+  然后除以32就表示一个thread的寄存器中包含的数据个数
+  所以对于epilogue0，每个thread处理当前thread中C矩阵寄存器的结果数量
+  而对epilogue1，则是每个thread处理128 / cutlass::sizeof_bits<ElementOutput>::value(这里结果为8)，即
+  每个线程向量化处理128bit的数据，这估计是为了使用最大的128bit向量化写回gmem
+
+  然后有个问题就是，为什么epilogue0和epilogue1的每个thread处理的数据量不能一样？
+  为什么epi1中每个thread能处理的数据量比epi0多一倍？
+  这是因为，在b2bgemm的gemm1的mainloop算完之后，会调用include/cutlass/epilogue/threadblock/epilogue.h中的()重载
+  先将计算结果写入smem，然后在smem中对数据的layout做处理，处理为行优先的排列，然后再对smem中的数据做epilogue1, 所以epi1可以一个thread处理8个数
+  我理解是因为gemm1算完之后的，由于后面没有gemm了，所以不需要再保证结果数据的layout满足mma的要求，所以就可以放入smem做layout重排，然后epi1可以用更大的向量化处理方式
+  而epi0因为还需要满足结果的layout满足mma对layout的要求（因为gemm1还需要用gemm0的结果数据），所以只能一个thread处理4个数
+  */
   using EpilogueOutputOp0 = 
-    cutlass::epilogue::thread::LinearCombinationRelu<
+    cutlass::epilogue::thread::LinearCombinationMish<
       ElementOutput,
       InstructionShape::kM * InstructionShape::kN / 32,
       ElementAccumulator,
@@ -153,7 +170,7 @@ bool run_fused_gemm_f16_sm80_shmem() {
     >;
 
   using EpilogueOutputOp1 = 
-    cutlass::epilogue::thread::LinearCombinationRelu<
+    cutlass::epilogue::thread::LinearCombinationMish<
       ElementOutput,
       128 / cutlass::sizeof_bits<ElementOutput>::value,
       ElementAccumulator,

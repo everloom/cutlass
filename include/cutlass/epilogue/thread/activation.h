@@ -415,6 +415,159 @@ struct SiLu<Array<T, N>> {
   }
 };
 
+// Mish operator introduced by Misra, D. in the following paper
+// "Mish: A Self Regularized Non-Monotonic Activation Function" (2019)
+// https://arxiv.org/abs/1908.08681
+// Mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+// Reference: https://pytorch.org/docs/stable/generated/torch.nn.Mish.html
+template <typename T>
+struct Mish {
+  static const bool kIsHeavy=true;
+  
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x) const {
+    // Compute mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+    return x * fast_tanh(fast_log(T(1) + fast_exp(x)));
+  }
+
+  using Params = LinearCombinationGenericParams<T>;
+
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x, Params const &params_) const {
+    return this->operator()(x);
+  }
+};
+
+// Specialization for float - avoid conversions and use efficient constants
+template <>
+struct Mish<float> {
+  static const bool kIsHeavy=true;
+  using T = float;
+  
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x) const {
+    // Optimized float version
+    return x * fast_tanh(fast_log(1.0f + fast_exp(x)));
+  }
+
+  using Params = LinearCombinationGenericParams<T>;
+
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x, Params const &params_) const {
+    return this->operator()(x);
+  }
+};
+
+// Specialization for half_t to handle type conversions properly
+template <>
+struct Mish<half_t> {
+  static const bool kIsHeavy=true;
+  using T = half_t;
+  
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x) const {
+    // Compute mish(x) = x * tanh(softplus(x))
+    // Convert to float for computation, then back to half_t
+    float x_float = float(x);
+    float sp = fast_log(1.0f + fast_exp(x_float));
+    return T(x_float * fast_tanh(sp));
+  }
+
+  using Params = LinearCombinationGenericParams<T>;
+
+  CUTLASS_HOST_DEVICE
+  T operator()(T const &x, Params const &params_) const {
+    return this->operator()(x);
+  }
+};
+
+template <typename T, int N>
+struct Mish<Array<T, N>> {
+  static const bool kIsHeavy=true;
+  
+  CUTLASS_HOST_DEVICE
+  Array<T, N> operator()(Array<T, N> const &value) const {
+    Array<T, N> y;
+    Mish<T> mish_op;
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < N; ++i) {
+      y[i] = mish_op(value[i]);
+    }
+
+    return y;
+  }
+
+  using Params = LinearCombinationGenericParams<T>;
+
+  CUTLASS_HOST_DEVICE
+  Array<T, N> operator()(Array<T, N> const &value, Params const &params_) const {
+    return this->operator()(value);
+  }
+};
+
+// half类型特化模版
+// Optimized version for half_t arrays - use vectorized operations
+template <int N>
+struct Mish<Array<half_t, N>> {
+  using T = half_t;
+  static const bool kIsHeavy=true;
+  // 性能稍逊的非向量化实现如下
+  // CUTLASS_HOST_DEVICE
+  // Array<T, N> operator()(Array<T, N> const &value) const {
+  //   Array<T, N> y;
+  //   Mish<T> mish_op;
+
+  //   CUTLASS_PRAGMA_UNROLL
+  //   for (int i = 0; i < N; ++i) {
+  //     y[i] = mish_op(value[i]);
+  //   }
+
+  //   return y;
+  // }
+
+  // 这里使用的向量化的实现，fast_exp fast_tanh add mul都是使用的cutlass自带的向量化模版实现，底层调用了向量化的ptx实现一个指令算多个数（这里是一个指令算两个数）
+  CUTLASS_HOST_DEVICE
+  Array<T, N> operator()(Array<T, N> const &x) const {
+    // Use vectorized operations for better performance
+    // mish(x) = x * tanh(log(1 + exp(x)))
+    // fast_exp fast_tanh模版定义在include/cutlass/fast_math.h中
+    // add和mul模版定义在include/cutlass/array.h中
+    fast_exp_op<Array<T, N>>  fast_exp;
+    fast_tanh_op<Array<T, N>> fast_tanh;
+    plus<Array<T, N>>         add;
+    multiplies<Array<T, N>>   mul;
+    
+    // Compute: exp(x)
+    Array<T, N> exp_x = fast_exp(x);
+    
+    // Compute: 1 + exp(x)
+    Array<T, N> one_plus_exp = add(cutlass::constants::one<T>(), exp_x);
+    
+    // Compute: log(1 + exp(x)) - done element-wise as no vectorized log for half_t
+    Array<T, N> softplus;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < N; ++i) {
+      // Convert to float for log, then back to half_t
+      softplus[i] = T(fast_log(float(one_plus_exp[i])));
+    }
+    
+    // Compute: tanh(softplus)
+    Array<T, N> tanh_softplus = fast_tanh(softplus);
+    
+    // Compute: x * tanh(softplus)
+    return mul(x, tanh_softplus);
+  }
+
+  using Params = LinearCombinationGenericParams<T>;
+
+  CUTLASS_HOST_DEVICE
+  Array<T, N> operator()(Array<T, N> const &x, Params const &params_) const {
+    return this->operator()(x);
+  }
+};
+
+
 // Hardswish operator introduced by Howard et al. in the following paper
 // "Searching for MobileNetV3" (2019)
 // https://arxiv.org/pdf/1905.02244.pdf

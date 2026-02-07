@@ -80,6 +80,7 @@ public:
   using FragmentAccumulator = Array<ElementAccumulator, kCount>;
   using FragmentSource = Array<ElementOutput, kCount>;
   using FragmentCompute = Array<ElementCompute, kCount>;
+  using FragmentScaleBias = Array<ElementCompute, kCount>;
 
   static FloatRoundStyle const kRound = Round;
 
@@ -192,6 +193,39 @@ public:
       intermediate = mul_add_accumulator(params_.alpha, converted_accumulator);    // D = alpha * Accum
     }
 
+    intermediate = skip_elementwise_ ? intermediate : activation(intermediate, params_);
+
+    // Convert to destination numeric type
+    NumericArrayConverter<ElementOutput, ElementCompute, kCount, Round> destination_converter;
+
+    return destination_converter(intermediate);
+  }
+
+  /// Computes per-channel linear scaling and bias : D = scale * accumulator + bias
+  /// Scale and Bias are from input Fragment
+  CUTLASS_HOST_DEVICE
+  FragmentOutput operator()(
+    FragmentAccumulator const &accumulator,
+    FragmentScaleBias const &scale,
+    FragmentScaleBias const &bias) const {
+    
+    // Convert source to interal compute numeric type
+    NumericArrayConverter<ElementCompute, ElementAccumulator, kCount, Round> accumulator_converter;
+
+    FragmentCompute converted_accumulator = accumulator_converter(accumulator);
+
+    // Perform per-channel scale and bias
+    FragmentCompute intermediate;
+
+    multiply_add<FragmentCompute> mul_add_accumulator;
+
+    if(Scale == ScaleType::OnlyAlphaPerChannelScaling)
+      intermediate = mul_add_accumulator(scale, converted_accumulator, bias);    // D = scale * Accum + bias
+    else
+      intermediate = mul_add_accumulator(params_.alpha, converted_accumulator, bias);   // D = alpha * Accum + bias
+
+    // Apply activation function
+    ActivationFunctor<FragmentCompute> activation;
     intermediate = skip_elementwise_ ? intermediate : activation(intermediate, params_);
 
     // Convert to destination numeric type
